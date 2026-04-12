@@ -1,0 +1,26 @@
+rpc_url = "https://soneium-rpc.publicnode.com"
+
+# Подробные сообщения logger.debug по всему проекту (false — только INFO и выше)
+debug_logging = false
+
+# Задержка между кошельками (сек)
+delay_min = 30
+delay_max = 120
+
+# Задержка между действиями одного кошелька (сек)
+action_delay_min = 30
+action_delay_max = 60
+
+disable_ssl = false
+shuffle_wallets = true
+gas_limit_multiplier = 1.2
+
+# --- Модуль 2: SoundChains ---
+soundchains_base_url = "https://soundchains.org"
+
+# --- Модуль 3: Superstake (только IP, без ставки ETH) ---
+# Сколько раундов нужно для квеста
+superstake_rounds_required = 10
+
+# --- Модуль ELHEXA: граница игрового дня по Москве (0–23). Env BONUS9_ELHEXA_RESET_HOUR_MSK важнее.
+elhexa_reset_hour_msk = 22

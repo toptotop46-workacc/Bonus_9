@@ -1,7 +1,7 @@
 rpc_url = "https://soneium-rpc.publicnode.com"
 
 # Подробные сообщения logger.debug по всему проекту (false — только INFO и выше)
-debug_logging = true
+debug_logging = false
 
 # Задержка между кошельками (сек)
 delay_min = 30

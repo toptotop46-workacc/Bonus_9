@@ -2,6 +2,7 @@
 
 import time
 import random
+import requests
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from eth_account import Account
@@ -13,16 +14,63 @@ EXPLORER_URL = "https://soneium.blockscout.com/tx/"
 
 
 def get_w3(rpc_url: str, proxy: str | None = None, disable_ssl: bool = False) -> Web3:
-    request_kwargs: dict = {}
+    session = requests.Session()
+    session.trust_env = False
     if proxy:
-        request_kwargs["proxies"] = {"http": proxy, "https": proxy}
+        session.proxies = {"http": proxy, "https": proxy}
     if disable_ssl:
-        request_kwargs["verify"] = False
+        session.verify = False
     from web3 import HTTPProvider
-    provider = HTTPProvider(rpc_url, request_kwargs=request_kwargs)
+    provider = HTTPProvider(rpc_url, session=session)
     w3 = Web3(provider)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    # Сохраняем параметры подключения, чтобы можно было переподнять provider после сетевых сбоев.
+    setattr(w3, "_bonus9_rpc_url", rpc_url)
+    setattr(w3, "_bonus9_proxy", proxy)
+    setattr(w3, "_bonus9_disable_ssl", disable_ssl)
     return w3
+
+
+def reconnect_w3(w3: Web3) -> Web3:
+    rpc_url = getattr(w3, "_bonus9_rpc_url", None)
+    proxy = getattr(w3, "_bonus9_proxy", None)
+    disable_ssl = bool(getattr(w3, "_bonus9_disable_ssl", False))
+
+    if not rpc_url:
+        provider = getattr(w3, "provider", None)
+        rpc_url = getattr(provider, "endpoint_uri", None)
+        request_kwargs = getattr(provider, "_request_kwargs", {}) or {}
+        if proxy is None:
+            proxies = request_kwargs.get("proxies") or {}
+            proxy = proxies.get("https") or proxies.get("http")
+        if not disable_ssl:
+            disable_ssl = request_kwargs.get("verify") is False
+
+    if not rpc_url:
+        raise RuntimeError("Cannot reconnect Web3 provider: rpc_url is unknown")
+    return get_w3(str(rpc_url), proxy, disable_ssl)
+
+
+def _is_transient_rpc_error(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    markers = (
+        "connection aborted",
+        "connection reset",
+        "reset by peer",
+        "remotedisconnected",
+        "read timed out",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "temporarily unavailable",
+        "connection refused",
+        "too many requests",
+        "429",
+        "502",
+        "503",
+        "504",
+    )
+    return any(m in s for m in markers)
 
 
 def get_eip1559_fees(w3: Web3) -> tuple[int, int]:
@@ -135,8 +183,27 @@ def eth_call(w3: Web3, to: str, data: bytes | str, sender: str | None = None) ->
     call = {"to": Web3.to_checksum_address(to), "data": data}
     if sender:
         call["from"] = Web3.to_checksum_address(sender)
-    result = w3.eth.call(call)
-    return bytes(result)
+    retries = 4
+    delay = 1.0
+    cur_w3 = w3
+    last_err: Exception | None = None
+
+    for attempt in range(retries):
+        try:
+            result = cur_w3.eth.call(call)
+            return bytes(result)
+        except Exception as exc:
+            last_err = exc
+            if attempt + 1 >= retries or not _is_transient_rpc_error(exc):
+                raise
+            logger.debug(
+                f"[web3] eth_call retry {attempt + 1}/{retries} after transport error: {exc}"
+            )
+            time.sleep(delay)
+            delay *= 1.5
+            cur_w3 = reconnect_w3(cur_w3)
+
+    raise RuntimeError(f"eth_call failed after {retries} attempts: {last_err}") from last_err
 
 
 def get_eoa_address(private_key: str) -> str:

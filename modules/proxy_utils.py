@@ -1,8 +1,12 @@
 """Proxy file parsing. Format: host:port:user:pass or host:port"""
 
+import random
 import re
 from pathlib import Path
 from modules import logger
+
+# Random offset set once per process run — spreads wallets across proxy pool differently each session
+_SESSION_OFFSET: int = random.randint(0, 999)
 
 
 def parse_proxy_line(line: str) -> str | None:
@@ -41,7 +45,22 @@ def load_proxies_from_file(path: Path) -> list[str]:
 def match_proxy(proxies: list[str], index: int) -> str | None:
     if not proxies:
         return None
-    return proxies[index % len(proxies)]
+    return proxies[(index + _SESSION_OFFSET) % len(proxies)]
+
+
+def rotate_proxy(
+    proxies: list[str],
+    current: str | None,
+    exclude: list[str] | None = None,
+) -> str | None:
+    """Return a proxy different from *current* (for mid-session rotation on error)."""
+    if not proxies:
+        return None
+    blocked = {current} if current else set()
+    if exclude:
+        blocked.update(exclude)
+    candidates = [p for p in proxies if p not in blocked]
+    return random.choice(candidates) if candidates else random.choice(proxies)
 
 
 def nonempty_proxies(proxies: list[str | None]) -> list[str]:

@@ -10,8 +10,13 @@ import random
 import re
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
+# Подавляем предупреждение camoufox о geoip (мы намеренно используем geoip=False)
+warnings.filterwarnings("ignore", message=".*geoip=True.*")
 
 import toml
 import questionary
@@ -26,6 +31,10 @@ from modules.portal_api import (
 )
 
 PROJECT_ROOT = Path(__file__).parent
+PUBLIC_SONEIUM_RPC_URL = "https://soneium-rpc.publicnode.com"
+_LEGACY_SONEIUM_RPC_HOSTS = {
+    "rpc.soneium.org",
+}
 
 
 # ── Banner ────────────────────────────────────────────────────────────────────
@@ -52,6 +61,20 @@ def load_config() -> dict:
         logger.error("config.toml не найден!")
         sys.exit(1)
     return toml.load(cfg_path)
+
+
+def normalize_rpc_url(rpc_url: str | None) -> str:
+    raw = str(rpc_url or "").strip()
+    if not raw:
+        return PUBLIC_SONEIUM_RPC_URL
+    try:
+        host = (urlparse(raw).hostname or "").lower()
+    except Exception:
+        host = ""
+    if host in _LEGACY_SONEIUM_RPC_HOSTS:
+        logger.warning(f"rpc_url {raw} -> {PUBLIC_SONEIUM_RPC_URL}")
+        return PUBLIC_SONEIUM_RPC_URL
+    return raw
 
 
 # ── Wallets ───────────────────────────────────────────────────────────────────
@@ -227,7 +250,8 @@ def _run_single_task(
         return True
 
     proxy = proxy_utils.match_proxy(proxies, i_orig)
-    w3 = get_w3(rpc_url, proxy, cfg.get("disable_ssl", False))
+    rpc_proxy = None if module == "superstake" else proxy
+    w3 = get_w3(rpc_url, rpc_proxy, cfg.get("disable_ssl", False))
 
     if module == "swap":
         from modules.startale_swap import swap_eth_to_usdsc
@@ -241,7 +265,9 @@ def _run_single_task(
 
     elif module == "gm":
         from modules.startale_gm import do_gm
-        do_gm(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies)
+        if do_gm(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies,
+                 headless=bool(cfg.get("gm_headless", True))) is False:
+            return False
 
     elif module == "soundchains":
         from modules.soundchains import run_soundchains
@@ -262,7 +288,9 @@ def _run_single_task(
 
     elif module == "elhexa":
         from modules.elhexa import do_elhexa_checkin
-        do_elhexa_checkin(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies)
+        if do_elhexa_checkin(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies,
+                             headless=bool(cfg.get("elhexa_headless", True))) is False:
+            return False
 
     return True
 
@@ -294,7 +322,7 @@ def main() -> None:
     cfg     = load_config()
     apply_elhexa_config_env(cfg)
     logger.apply_config(cfg)
-    rpc_url = cfg.get("rpc_url", "https://soneium-rpc.publicnode.com")
+    rpc_url = normalize_rpc_url(cfg.get("rpc_url", PUBLIC_SONEIUM_RPC_URL))
 
     db.init_db()
     wallets = load_wallets()

@@ -1,11 +1,11 @@
 rpc_url = "https://soneium-rpc.publicnode.com"
 
 # Подробные сообщения logger.debug по всему проекту (false — только INFO и выше)
-debug_logging = false
+debug_logging = true
 
 # Задержка между кошельками (сек)
 delay_min = 30
-delay_max = 120
+delay_max = 60
 
 # Задержка между действиями одного кошелька (сек)
 action_delay_min = 30
@@ -24,3 +24,7 @@ superstake_rounds_required = 10
 
 # --- Модуль ELHEXA: граница игрового дня по Москве (0–23). Env BONUS9_ELHEXA_RESET_HOUR_MSK важнее.
 elhexa_reset_hour_msk = 22
+
+# --- Headless-режим браузера (true — без окна, false — с окном для отладки) ---
+gm_headless = true
+elhexa_headless = true

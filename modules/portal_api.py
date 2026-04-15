@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -46,6 +47,7 @@ def get_bonus_dapp_data(
     *,
     retries: int | None = None,
     retry_delay: float | None = None,
+    timeout: tuple[float, float] | None = None,
 ) -> list[Any] | None:
     """
     Сырой список dapp с портала. При обрыве/429/таймауте — повторы (как в require_account_status),
@@ -57,6 +59,10 @@ def get_bonus_dapp_data(
     d = retry_delay if retry_delay is not None else float(
         os.environ.get("BONUS9_PORTAL_HTTP_RETRY_DELAY", "0.5")
     )
+    req_timeout = timeout if timeout is not None else (
+        float(os.environ.get("BONUS9_PORTAL_CONNECT_TIMEOUT", "6")),
+        float(os.environ.get("BONUS9_PORTAL_READ_TIMEOUT", "18")),
+    )
     for attempt in range(r):
         try:
             s = requests.Session()
@@ -67,7 +73,7 @@ def get_bonus_dapp_data(
                 PORTAL_URL,
                 params={"address": address},
                 headers=_headers(),
-                timeout=25,
+                timeout=req_timeout,
             )
             if resp.status_code == 429:
                 ra = resp.headers.get("Retry-After")
@@ -241,10 +247,68 @@ def fetch_portal_data_batch(
     """
     cleaned = proxy_utils.nonempty_proxies(proxy_urls)
     results: dict[str, list[Any] | None] = {}
+    address_index = {addr: i for i, addr in enumerate(addresses)}
+    bad_proxies: set[str] = set()
+    bad_lock = threading.Lock()
+    batch_timeout = (
+        float(os.environ.get("BONUS9_PORTAL_BATCH_CONNECT_TIMEOUT", "3")),
+        float(os.environ.get("BONUS9_PORTAL_BATCH_READ_TIMEOUT", "8")),
+    )
+    proxy_attempts = max(1, int(os.environ.get("BONUS9_PORTAL_BATCH_PROXY_ATTEMPTS", "3")))
+    max_workers = max(
+        1,
+        int(
+            os.environ.get(
+                "BONUS9_PORTAL_BATCH_MAX_WORKERS",
+                str(min(batch_size, 32)),
+            )
+        ),
+    )
+
+    def _mark_bad(proxy: str | None) -> None:
+        if not proxy:
+            return
+        with bad_lock:
+            bad_proxies.add(proxy)
+
+    def _bad_snapshot() -> set[str]:
+        with bad_lock:
+            return set(bad_proxies)
+
+    def _proxy_candidates(wallet_index: int) -> list[str | None]:
+        if not cleaned:
+            return [None]
+        primary = proxy_utils.match_proxy(cleaned, wallet_index)
+        blocked = _bad_snapshot()
+        candidates: list[str | None] = []
+        if primary not in blocked:
+            candidates.append(primary)
+        rotated = cleaned[(wallet_index % len(cleaned)) :] + cleaned[: (wallet_index % len(cleaned))]
+        for proxy in rotated:
+            if proxy in blocked or proxy in candidates:
+                continue
+            candidates.append(proxy)
+            if len(candidates) >= proxy_attempts:
+                break
+        if primary and primary not in blocked and primary not in candidates:
+            candidates.append(primary)
+        return candidates[:proxy_attempts] if candidates else [None]
 
     def _fetch_one(address: str, wallet_index: int) -> tuple[str, list[Any] | None]:
-        proxy = proxy_utils.match_proxy(cleaned, wallet_index) if cleaned else None
-        return address, get_bonus_dapp_data(address, proxy)
+        for attempt_i, proxy in enumerate(_proxy_candidates(wallet_index), 1):
+            data = get_bonus_dapp_data(
+                address,
+                proxy,
+                retries=1,
+                retry_delay=0,
+                timeout=batch_timeout,
+            )
+            if data is not None:
+                return address, data
+            _mark_bad(proxy)
+            if proxy and attempt_i < proxy_attempts:
+                logger.debug(f"[Portal batch] {address} proxy fail -> rotate ({attempt_i}/{proxy_attempts})")
+        return address, None
 
     with tqdm(
         total=len(addresses),
@@ -255,13 +319,17 @@ def fetch_portal_data_batch(
     ) as pbar:
         for start in range(0, len(addresses), batch_size):
             chunk = addresses[start : start + batch_size]
-            with ThreadPoolExecutor(max_workers=len(chunk)) as executor:
+            with ThreadPoolExecutor(max_workers=min(len(chunk), max_workers)) as executor:
                 indexed = {
                     executor.submit(_fetch_one, addr, start + j): addr
                     for j, addr in enumerate(chunk)
                 }
                 for future in as_completed(indexed):
-                    addr, data = future.result()
+                    try:
+                        addr, data = future.result(timeout=65)
+                    except Exception:
+                        addr = indexed[future]
+                        data = None
                     results[addr] = data
                     pbar.update(1)
 
@@ -270,13 +338,20 @@ def fetch_portal_data_batch(
         missing = [a for a in addresses if results.get(a) is None]
         if not missing:
             break
-        n = len(cleaned) if cleaned else 1
         for addr in missing:
-            idx = addresses.index(addr)
-            proxy = proxy_utils.match_proxy(cleaned, idx + round_i + 1) if cleaned else None
-            data = get_bonus_dapp_data(addr, proxy)
-            if data is not None:
-                results[addr] = data
+            idx = address_index[addr]
+            for proxy in _proxy_candidates(idx + round_i + 1):
+                data = get_bonus_dapp_data(
+                    addr,
+                    proxy,
+                    retries=1,
+                    retry_delay=0,
+                    timeout=batch_timeout,
+                )
+                if data is not None:
+                    results[addr] = data
+                    break
+                _mark_bad(proxy)
 
     return results
 

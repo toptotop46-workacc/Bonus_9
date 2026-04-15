@@ -119,6 +119,21 @@ def is_elhexa_done_today(address: str) -> bool:
     return is_elhexa_done_this_period(address, elhexa_current_period_id())
 
 
+def touch_elhexa_period(address: str, *, period_id: str | None = None) -> None:
+    """
+    Зафиксировать текущий игровой период ELHEXA без изменения elhexa_total.
+    Полезно, когда on-chain check-in уже найден, а портал ещё не успел проиндексировать шаг.
+    """
+    from modules.elhexa_period import elhexa_current_period_id
+
+    pid = period_id if period_id is not None else elhexa_current_period_id()
+    upsert_account(
+        address,
+        elhexa_last_period=pid,
+        elhexa_last_date=pid,
+    )
+
+
 def mark_elhexa_done(address: str, *, period_id: str | None = None) -> None:
     from modules.elhexa_period import elhexa_current_period_id
 

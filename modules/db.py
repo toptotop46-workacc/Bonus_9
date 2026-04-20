@@ -85,6 +85,19 @@ def add_superstake_round(address: str, tx_hash: str) -> None:
     upsert_account(address, superstake_rounds=rounds, superstake_txs=history)
 
 
+def is_elhexa_done_today(address: str) -> bool:
+    info = get_account_info(address)
+    last = info.get("elhexa_last_date")
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    return last == today
+
+
+def mark_elhexa_done(address: str, tx_hash: str) -> None:
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    total = get_account_info(address).get("elhexa_total", 0) + 1
+    upsert_account(address, elhexa_last_date=today, elhexa_total=total, elhexa_last_tx=tx_hash)
+
+
 def is_soundchains_done(address: str) -> bool:
     return bool(get_account_info(address).get("soundchains_done"))
 

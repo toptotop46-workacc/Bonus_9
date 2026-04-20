@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-# Подавляем предупреждение camoufox о geoip (мы намеренно используем geoip=False)
+# Подавляем предупреждение camoufox о geoip (startale_gm использует geoip=False)
 warnings.filterwarnings("ignore", message=".*geoip=True.*")
 
 import toml
 import questionary
 
 from modules import logger, db, crypto_utils, proxy_utils
-from modules.elhexa_period import apply_elhexa_config_env
 from modules.web3_utils import get_w3, get_eoa_address
 from modules.portal_api import (
     fetch_portal_data_batch,
@@ -282,8 +281,7 @@ def _run_single_task(
 
     elif module == "elhexa":
         from modules.elhexa import do_elhexa_checkin
-        if do_elhexa_checkin(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies,
-                             headless=bool(cfg.get("elhexa_headless", True))) is False:
+        if do_elhexa_checkin(pk, proxy=proxy, rpc_url=rpc_url, proxy_pool=proxies) is False:
             return False
 
     return True
@@ -314,7 +312,6 @@ def main() -> None:
     selected = ask_modules()
 
     cfg     = load_config()
-    apply_elhexa_config_env(cfg)
     logger.apply_config(cfg)
     rpc_url = normalize_rpc_url(cfg.get("rpc_url", PUBLIC_SONEIUM_RPC_URL))
 

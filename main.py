@@ -22,7 +22,7 @@ import toml
 import questionary
 
 from modules import logger, db, crypto_utils, proxy_utils
-from modules.elhexa_period import apply_elhexa_config_env, elhexa_current_period_id
+from modules.elhexa_period import apply_elhexa_config_env
 from modules.web3_utils import get_w3, get_eoa_address
 from modules.portal_api import (
     fetch_portal_data_batch,
@@ -119,7 +119,7 @@ def show_status(
         sc    = "ok" if (status["soundchains_done"]  or info.get("soundchains_done")) else "-"
         ss_p  = max(status["superstake"], info.get("superstake_rounds", 0))
         ss    = f"{ss_p}/{status['superstake_required']}"
-        elh_p = max(status["elhexa"], info.get("elhexa_total", 0))
+        elh_p = status["elhexa"]
         elh   = f"{elh_p}/{status['elhexa_required']}"
 
         print(
@@ -212,14 +212,8 @@ def _is_already_done(
 
     if module == "elhexa":
         req = status.get("elhexa_required", 3)
-        cnt = max(status.get("elhexa", 0), info.get("elhexa_total", 0))
-        quest_complete = status.get("elhexa_done", False) or cnt >= req
-        if quest_complete:
-            return True
-        period_id = elhexa_current_period_id()
-        if db.is_elhexa_done_this_period(addr, period_id):
-            return True
-        return False
+        cnt = status.get("elhexa", 0)
+        return status.get("elhexa_done", False) or cnt >= req
 
     return False
 

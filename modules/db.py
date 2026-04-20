@@ -93,57 +93,6 @@ def mark_soundchains_done(address: str, tx_hash: str) -> None:
     upsert_account(address, soundchains_done=True, soundchains_tx=tx_hash)
 
 
-def _elhexa_last_period_stored(info: dict) -> str | None:
-    last = info.get("elhexa_last_period")
-    if last and isinstance(last, str) and len(last) >= 10:
-        return last[:10]
-    last = info.get("elhexa_last_date")
-    if last and isinstance(last, str) and len(last) >= 10:
-        return last[:10]
-    return None
-
-
-def is_elhexa_done_this_period(address: str, period_id: str) -> bool:
-    """True, если для текущего игрового периода ELHEXA уже зафиксирован чекин в БД."""
-    info = get_account_info(address)
-    last = _elhexa_last_period_stored(info)
-    if not last:
-        return False
-    return last == period_id
-
-
-def is_elhexa_done_today(address: str) -> bool:
-    """Устар.: используйте is_elhexa_done_this_period с period_id из elhexa_period."""
-    from modules.elhexa_period import elhexa_current_period_id
-
-    return is_elhexa_done_this_period(address, elhexa_current_period_id())
-
-
-def touch_elhexa_period(address: str, *, period_id: str | None = None) -> None:
-    """
-    Зафиксировать текущий игровой период ELHEXA без изменения elhexa_total.
-    Полезно, когда on-chain check-in уже найден, а портал ещё не успел проиндексировать шаг.
-    """
-    from modules.elhexa_period import elhexa_current_period_id
-
-    pid = period_id if period_id is not None else elhexa_current_period_id()
-    upsert_account(
-        address,
-        elhexa_last_period=pid,
-        elhexa_last_date=pid,
-    )
-
-
-def mark_elhexa_done(address: str, *, period_id: str | None = None) -> None:
-    from modules.elhexa_period import elhexa_current_period_id
-
-    pid = period_id if period_id is not None else elhexa_current_period_id()
-    upsert_account(
-        address,
-        elhexa_last_period=pid,
-        elhexa_last_date=pid,
-        elhexa_total=get_account_info(address).get("elhexa_total", 0) + 1,
-    )
 
 
 def get_startale_user_id(address: str) -> str | None:

@@ -25,11 +25,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 
 from modules import db, logger, proxy_utils
-from modules.elhexa_period import (
-    apply_elhexa_config_env,
-    elhexa_current_period_id,
-    elhexa_next_reset_msk_str,
-)
+
 from modules.portal_api import get_bonus_dapp_data, parse_account_status, require_account_status
 from modules.startale_gm import (
     APP_URL,
@@ -183,8 +179,6 @@ def _fetch_smart_accounts_from_mapping(
         for raw in data.get("smartAccounts") or []:
             if isinstance(raw, str) and Web3.is_address(raw):
                 found.append(Web3.to_checksum_address(raw))
-        if found:
-            db.set_smart_account(eoa_address, found[0])
         logger.debug(f"[ELHEXA] mapping smartAccounts={found or '[]'}")
         return found
 
@@ -224,42 +218,17 @@ def _get_onchain_checkin_status(
         return None
 
 
-def _already_checked_today_onchain(
-    eoa_address: str,
-    rpc_url: str,
-    period_id: str,
-    proxy: str | None,
-    proxy_pool: list[str | None] | None = None,
-) -> bool:
-    candidates: list[str] = []
-
-    cached_sa = db.get_smart_account(eoa_address)
-    if isinstance(cached_sa, str) and Web3.is_address(cached_sa):
-        candidates.append(Web3.to_checksum_address(cached_sa))
-
-    for sa in _fetch_smart_accounts_from_mapping(eoa_address, proxy, proxy_pool):
-        if sa not in candidates:
-            candidates.append(sa)
-
-    if not candidates:
-        logger.debug("[ELHEXA] precheck: smart account not found in cache/mapping")
+def _is_checked_today_onchain(sa_address: str, rpc_url: str) -> bool:
+    """True если контракт сообщает, что SA уже делал чекин сегодня."""
+    status = _get_onchain_checkin_status(sa_address, rpc_url)
+    if not status:
         return False
-
-    for sa in candidates:
-        status = _get_onchain_checkin_status(sa, rpc_url)
-        if not status:
-            continue
-        logger.debug(
-            f"[ELHEXA] on-chain precheck SA={sa} "
-            f"checked={status['checked_today']} total={status['total']} "
-            f"lastDay={status['last_day']} currentDay={status['current_day']}"
-        )
-        if status["checked_today"]:
-            db.touch_elhexa_period(eoa_address, period_id=period_id)
-            logger.info(f"[ELHEXA] on-chain: already checked today ({sa}), браузер не запускаем")
-            return True
-
-    return False
+    logger.debug(
+        f"[ELHEXA] on-chain SA={sa_address} "
+        f"checked={status['checked_today']} total={status['total']} "
+        f"lastDay={status['last_day']} currentDay={status['current_day']}"
+    )
+    return bool(status["checked_today"])
 
 
 def _last_tx_hash(bucket: list[str]) -> str | None:
@@ -875,10 +844,10 @@ async def _flow_checkin_bonus_free_tier(game_frame) -> None:
     logger.debug("[ELHEXA] CHECK-IN $0 canvas-only, ждём сцену")
     await game_frame.page.wait_for_timeout(wait_ms)
 
-    bx = _env_float("BONUS9_ELHEXA_CANVAS_CHECKIN_X", 0.78)
-    by = _env_float("BONUS9_ELHEXA_CANVAS_CHECKIN_Y", 0.52)
+    bx = _env_float("BONUS9_ELHEXA_CANVAS_CHECKIN_X", 0.75)
+    by = _env_float("BONUS9_ELHEXA_CANVAS_CHECKIN_Y", 0.55)
     x_offsets = (0.0, 0.04, 0.08, -0.03, 0.11)
-    y_offsets = (0.0, -0.012, 0.012)
+    y_offsets = (0.0, -0.03, 0.03, -0.05, 0.05)
     candidates: list[tuple[float, float]] = []
     for dx in x_offsets:
         for dy in y_offsets:
@@ -1273,7 +1242,7 @@ async def _process_wallet(
     check_id: int,
     app_url: str,
     portal_elhexa_before: int,
-    current_period_id: str,
+    sa_address: str | None,
 ) -> bool:
     """
     Используем camoufox (Firefox) для SIWE авторизации как в startale_gm.
@@ -1546,7 +1515,6 @@ async def _process_wallet(
                 logger.info("[ELHEXA] Claimed до $0, пропуск")
                 db.mark_elhexa_done(address, period_id=current_period_id)
                 return True
-
             await _flow_checkin_bonus_free_tier(game_fr)
             await page.wait_for_timeout(2000)
 
@@ -1558,7 +1526,6 @@ async def _process_wallet(
             )
             if await _checkin_free_tier_claimed(page, game_fr, checkin_state):
                 logger.info("[ELHEXA] Claimed после $0, пропуск")
-                db.mark_elhexa_done(address, period_id=current_period_id)
                 return True
 
             if not await _confirm_startale_transaction(page):
@@ -1570,7 +1537,6 @@ async def _process_wallet(
                 )
                 if await _checkin_free_tier_claimed(page, game_fr, checkin_state):
                     logger.info("[ELHEXA] Claimed, Confirm не было — OK")
-                    db.mark_elhexa_done(address, period_id=current_period_id)
                     return True
                 raw = get_bonus_dapp_data(address, proxy)
                 if raw:
@@ -1578,13 +1544,7 @@ async def _process_wallet(
                     p2 = int(st2.get("elhexa", 0))
                     if p2 > portal_elhexa_before:
                         logger.info(f"[ELHEXA] портал {portal_elhexa_before}→{p2}, OK (без Confirm)")
-                        db.upsert_account(
-                            address,
-                            elhexa_last_period=current_period_id,
-                            elhexa_last_date=current_period_id,
-                            elhexa_total=p2,
-                    )
-                    return True
+                        return True
                 no_confirm_wait = int(os.environ.get("BONUS9_ELHEXA_NO_CONFIRM_OUTCOME_WAIT_S", "15"))
                 logger.debug(f"[ELHEXA] Confirm не появился, коротко ждём outcome (~{no_confirm_wait}s)")
                 success_wo_confirm = await _wait_checkin_outcome(
@@ -1599,7 +1559,6 @@ async def _process_wallet(
                 )
                 if success_wo_confirm:
                     logger.info("[ELHEXA] outcome подтверждён без Confirm")
-                    db.mark_elhexa_done(address, period_id=current_period_id)
                     return True
                 logger.error("[ELHEXA] нет Confirm")
                 return False
@@ -1630,10 +1589,8 @@ async def _process_wallet(
                 th = _last_tx_hash(tx_bucket)
                 if th:
                     logger.debug(f"[ELHEXA] tx из bundler: {th[:10]}…{th[-6:]}")
-                sa = db.get_smart_account(address)
-                if th and sa:
-                    post_elhexa_checkin_verify(th, sa, check_id, proxy)
-                db.mark_elhexa_done(address, period_id=current_period_id)
+                if th and sa_address:
+                    post_elhexa_checkin_verify(th, sa_address, check_id, proxy)
                 return True
 
             logger.warning("[ELHEXA] таймаут после Confirm")
@@ -1655,71 +1612,37 @@ async def _do_elhexa_async(
 ) -> bool:
     acct = Account.from_key(private_key)
     eoa_address = acct.address
-    period_id = elhexa_current_period_id()
-    next_reset = elhexa_next_reset_msk_str()
 
-    # 1) Сначала портал — без этого не открываем браузер и не делаем браузерную попытку.
+    # 1) Портал — источник истины о прогрессе квеста
     st = require_account_status(eoa_address, proxy, proxy_pool=proxy_pool)
     req = int(st.get("elhexa_required", 3))
     portal_cnt = int(st.get("elhexa", 0))
     el_done = bool(st.get("elhexa_done"))
-    info = db.get_account_info(eoa_address) or {}
-    db_total = int(info.get("elhexa_total", 0))
-    cnt = max(portal_cnt, db_total)
 
     logger.info(
-        f"[ELHEXA] {portal_cnt}/{req} БД={db_total} done={el_done} | "
-        f"период {period_id} МСК | сброс ~{next_reset}"
+        f"[ELHEXA] {portal_cnt}/{req} done={el_done}"
     )
-    logger.debug(f"[ELHEXA] шаги {min(portal_cnt, req)}/{req}")
 
-    if el_done or cnt >= req:
-        logger.info(f"[ELHEXA] квест закрыт {cnt}/{req}, пропуск")
-        if portal_cnt > db_total:
-            db.upsert_account(eoa_address, elhexa_total=portal_cnt)
+    if el_done or portal_cnt >= req:
+        logger.info(f"[ELHEXA] квест закрыт {portal_cnt}/{req}, пропуск")
         return False
 
-    if portal_cnt > db_total:
-        old_db = db_total
-        db.upsert_account(eoa_address, elhexa_total=portal_cnt)
-        logger.info(f"[ELHEXA] синхр БД {old_db}→{portal_cnt}")
-        force_browser = os.environ.get(
-            "BONUS9_ELHEXA_FORCE_BROWSER_AFTER_SYNC", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
-        # НЕ пропускаем браузер если в текущем периоде ещё не был чекин
-        if not force_browser and el_done:
-            logger.info(
-                f"[ELHEXA] skip браузер: портал впереди и чекин в периоде уже выполнен"
-            )
-            logger.debug(
-                "[ELHEXA] принудительно: BONUS9_ELHEXA_FORCE_BROWSER_AFTER_SYNC=1"
-            )
-            return False
-        if not force_browser and not el_done:
-            logger.info(
-                f"[ELHEXA] браузер: портал впереди но чекин в периоде ещё не выполнен (el_done=False)"
-            )
-        elif force_browser:
-            logger.warning("[ELHEXA] FORCE_BROWSER_AFTER_SYNC=1, playwright")
+    # 2) Получаем SA свежим из portal mapping (без кеша БД)
+    sa_list = _fetch_smart_accounts_from_mapping(eoa_address, proxy, proxy_pool)
+    sa_address = sa_list[0] if sa_list else None
 
-    db_total = int(db.get_account_info(eoa_address).get("elhexa_total", 0))
-
-    if db.is_elhexa_done_this_period(eoa_address, period_id):
-        logger.debug(f"[ELHEXA] портал {portal_cnt} vs БД {db_total}")
-        logger.info(
-            f"[ELHEXA] период {period_id} уже в БД | {portal_cnt}/{req} | next ~{next_reset}"
-        )
+    if not sa_address:
+        logger.warning("[ELHEXA] SA не найден в portal mapping, пропуск")
         return False
 
-    if _already_checked_today_onchain(
-        eoa_address,
-        rpc_url,
-        period_id,
-        proxy,
-        proxy_pool=proxy_pool,
-    ):
+    # 3) On-chain: проверяем, был ли уже чекин сегодня.
+    # Доверяем on-chain только если портал уже зафиксировал хотя бы один чекин для этого EOA:
+    # при portal_cnt == 0 SA из mapping может быть не связан с этим EOA в системе портала.
+    if portal_cnt > 0 and _is_checked_today_onchain(sa_address, rpc_url):
+        logger.info(f"[ELHEXA] on-chain: already checked today ({sa_address}), браузер не запускаем")
         return False
 
+    # 4) Контракт не на паузе?
     if is_paused(rpc_url):
         logger.warning("[ELHEXA] paused, пропуск")
         return False
@@ -1742,7 +1665,7 @@ async def _do_elhexa_async(
         check_id,
         app_url,
         portal_elhexa_before=portal_cnt,
-        current_period_id=period_id,
+        sa_address=sa_address,
     )
 
     return ok
@@ -1759,26 +1682,12 @@ def do_elhexa_checkin(
     """
     Ежедневный чекин ELHEXA через мини-приложение Startale (Dynamic WaaS + bundler в браузере).
 
-    Перед запуском Playwright модуль сначала:
-    - читает статус с портала (require_account_status)
-    - проверяет on-chain, был ли уже check-in сегодня для smart account из cache/mapping
+    Решение о запуске браузера принимается исключительно на основе:
+    - статуса квеста с портала (require_account_status)
+    - on-chain данных getCheckInStatus(SA) из portal mapping
 
-    Если портал показывает больший счётчик, чем БД (например 1/3 при elhexa_total=0), после
-    синхронизации браузер по умолчанию не запускается — чекин уже зачтён на портале.
-    Принудительно: BONUS9_ELHEXA_FORCE_BROWSER_AFTER_SYNC=1.
-
-    Игровой день: граница по Europe/Moscow (по умолчанию 22:00), см. config
-    `elhexa_reset_hour_msk` или env BONUS9_ELHEXA_RESET_HOUR_MSK.
+    При падении с исключением — до 5 попыток с ротацией прокси из proxy_pool.
     """
-    try:
-        import toml
-
-        cfg_path = PROJECT_ROOT / "config.toml"
-        if cfg_path.exists():
-            apply_elhexa_config_env(toml.load(cfg_path))
-    except Exception:
-        pass
-
     app_url = (os.environ.get("BONUS9_ELHEXA_APP_URL") or "").strip() or DEFAULT_APP_URL
     hl = headless
     if hl is None:
@@ -1788,8 +1697,30 @@ def do_elhexa_checkin(
         ).strip().lower()
         hl = raw not in ("0", "false", "no", "off")
 
-    return asyncio.run(
-        _do_elhexa_async(
-            private_key, proxy, rpc_url, hl, check_id, app_url, proxy_pool=proxy_pool
-        )
-    )
+    max_attempts = int(os.environ.get("BONUS9_ELHEXA_MAX_ATTEMPTS", "5"))
+    pool = proxy_utils.nonempty_proxies(proxy_pool or [])
+    used_proxies: list[str] = []
+    current_proxy = proxy
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return asyncio.run(
+                _do_elhexa_async(
+                    private_key, current_proxy, rpc_url, hl, check_id, app_url,
+                    proxy_pool=proxy_pool,
+                )
+            )
+        except Exception as exc:
+            logger.warning(f"[ELHEXA] попытка {attempt}/{max_attempts} ошибка: {exc}")
+            if attempt == max_attempts:
+                logger.error("[ELHEXA] все попытки исчерпаны")
+                return False
+            if current_proxy and current_proxy not in used_proxies:
+                used_proxies.append(current_proxy)
+            next_proxy = proxy_utils.rotate_proxy(pool, current_proxy, exclude=used_proxies)
+            if next_proxy:
+                logger.info(f"[ELHEXA] ротация прокси → {proxy_utils.nonempty_proxies([next_proxy])}")
+                current_proxy = next_proxy
+            time.sleep(2)
+
+    return False

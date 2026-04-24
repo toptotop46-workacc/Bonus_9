@@ -10,13 +10,9 @@ import random
 import re
 import sys
 import time
-import warnings
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
-
-# Подавляем предупреждение camoufox о geoip (startale_gm использует geoip=False)
-warnings.filterwarnings("ignore", message=".*geoip=True.*")
 
 import toml
 import questionary

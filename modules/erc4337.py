@@ -950,6 +950,7 @@ def execute_user_op(
     rpc_url: str = "https://soneium-rpc.publicnode.com",
     account_index: int = 0,
     smart_account_address: str | None = None,
+    allow_api_sa_mismatch: bool = False,
 ) -> str:
     """
     High-level: build and send a single-call UserOperation.
@@ -957,6 +958,9 @@ def execute_user_op(
     account_index — salt смарт-аккаунта (как index в toStartaleSmartAccount), по умолчанию 0.
     smart_account_address — если задан (например из GET /user linked_accounts Startale),
     используется вместо factory.computeAccountAddress; иначе квесты могут не засчитать tx.
+    allow_api_sa_mismatch — разрешить SA из API, даже если он не воспроизводится текущей
+    локальной моделью factory.computeAccountAddress(initData, salt). Нужен для real-world
+    кейсов Startale, где API-адрес валиден, а локальная реконструкция initData не совпадает.
     """
     eoa_address = Account.from_key(private_key).address
     computed = get_smart_account_address(eoa_address, account_index, rpc_url)
@@ -966,27 +970,34 @@ def execute_user_op(
     if smart_account_address:
         sa_address = Web3.to_checksum_address(smart_account_address.strip())
         if computed.lower() != sa_address.lower():
-            found = find_startale_account_index_for_address(
-                eoa_address, sa_address, rpc_url
-            )
-            if found is not None:
-                if found != account_index:
-                    logger.warning(
-                        f"[ERC4337] SA из API = factory при index={found} "
-                        f"(BONUS9_STARTALE_ACCOUNT_INDEX={account_index} неверен — исправлено)"
-                    )
-                account_index = found
-                computed = get_smart_account_address(eoa_address, account_index, rpc_url)
-            else:
-                mx = int(os.environ.get("BONUS9_STARTALE_ACCOUNT_INDEX_SEARCH_MAX", "128"))
-                raise RuntimeError(
-                    f"Адрес SA из Startale API ({sa_address}) не совпадает ни с одним "
-                    f"factory.computeAccountAddress для этого ключа (index 0…{mx}). "
-                    "Подпись UserOp будет отклонена (-32507): SA в API не тот смарт-аккаунт, "
-                    "который получается из этого private key через factory. "
-                    "Запусти с BONUS9_USE_FACTORY_SMART_ACCOUNT_ONLY=1 (UserOp с factory-адресом) "
-                    "или проверь, что keys.txt — тот же кошелёк, что в Startale."
+            if allow_api_sa_mismatch:
+                logger.warning(
+                    "[ERC4337] SA из API не совпал с локальным factory.computeAccountAddress, "
+                    "но allow_api_sa_mismatch=True — использую API-адрес без подмены"
                 )
+                computed = sa_address
+            else:
+                found = find_startale_account_index_for_address(
+                    eoa_address, sa_address, rpc_url
+                )
+                if found is not None:
+                    if found != account_index:
+                        logger.warning(
+                            f"[ERC4337] SA из API = factory при index={found} "
+                            f"(BONUS9_STARTALE_ACCOUNT_INDEX={account_index} неверен — исправлено)"
+                        )
+                    account_index = found
+                    computed = get_smart_account_address(eoa_address, account_index, rpc_url)
+                else:
+                    mx = int(os.environ.get("BONUS9_STARTALE_ACCOUNT_INDEX_SEARCH_MAX", "128"))
+                    raise RuntimeError(
+                        f"Адрес SA из Startale API ({sa_address}) не совпадает ни с одним "
+                        f"factory.computeAccountAddress для этого ключа (index 0…{mx}). "
+                        "Подпись UserOp будет отклонена (-32507): SA в API не тот смарт-аккаунт, "
+                        "который получается из этого private key через factory. "
+                        "Запусти с BONUS9_USE_FACTORY_SMART_ACCOUNT_ONLY=1 (UserOp с factory-адресом) "
+                        "или проверь, что keys.txt — тот же кошелёк, что в Startale."
+                    )
     else:
         sa_address = computed
         cached = db.get_smart_account(eoa_address)
@@ -1134,8 +1145,53 @@ def execute_user_op(
         raise RuntimeError("sendUserOperation: не удалось после повторов")
     logger.debug(f"[ERC4337] opHash {op_hash}")
 
-    # ── Wait for receipt ──────────────────────────────────────────────────────
-    receipt = wait_for_user_op(op_hash, proxy)
+    # ── Wait for receipt (с rebroadcast, если UserOp «висит» в мемпуле) ───────
+    rebroadcast_max = max(1, int(os.environ.get("BONUS9_USEROP_REBROADCAST_ATTEMPTS", "3")))
+    rebroadcast_wait = max(60, int(os.environ.get("BONUS9_USEROP_REBROADCAST_WAIT_SEC", "150")))
+    receipt = None
+    for include_try in range(rebroadcast_max):
+        try:
+            timeout = None if include_try == 0 else rebroadcast_wait
+            receipt = wait_for_user_op(op_hash, proxy, timeout=timeout)
+            break
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "не получила receipt" not in msg and "receipt" not in msg:
+                raise
+            if include_try >= rebroadcast_max - 1:
+                raise
+            logger.warning(
+                f"[ERC4337] UserOp долго в мемпуле — rebroadcast "
+                f"({include_try + 1}/{rebroadcast_max - 1})"
+            )
+            _bump_fee_fields_after_replacement_error(user_op, None)
+            try:
+                pm_data = get_paymaster_data(user_op, proxy)
+                user_op["paymaster"] = pm_data.get("paymaster", user_op["paymaster"])
+                user_op["paymasterData"] = pm_data.get("paymasterData", user_op["paymasterData"])
+                user_op["paymasterVerificationGasLimit"] = pm_data.get(
+                    "paymasterVerificationGasLimit", user_op["paymasterVerificationGasLimit"]
+                )
+                user_op["paymasterPostOpGasLimit"] = pm_data.get(
+                    "paymasterPostOpGasLimit", user_op["paymasterPostOpGasLimit"]
+                )
+            except Exception as ex:
+                logger.warning(f"[ERC4337] paymaster после timeout: {ex}")
+            user_op["signature"] = sign_user_op(user_op, private_key)
+            try:
+                op_hash = send_user_op(user_op, proxy)
+            except BundlerRpcError as se:
+                inner = se.err if isinstance(se.err, dict) else {}
+                if inner.get("code") == -32602 and inner.get("message") == "replacement underpriced":
+                    if _bump_fee_fields_after_replacement_error(user_op, inner.get("data")):
+                        user_op["signature"] = sign_user_op(user_op, private_key)
+                        op_hash = send_user_op(user_op, proxy)
+                    else:
+                        raise RuntimeError(f"sendUserOperation error: {se.err}") from se
+                else:
+                    raise RuntimeError(f"sendUserOperation error: {se.err}") from se
+    if receipt is None:
+        raise RuntimeError("UserOp не получила receipt после rebroadcast")
     tx_hash = receipt.get("receipt", {}).get("transactionHash", op_hash)
     if isinstance(tx_hash, bytes):
         tx_hash = Web3.to_hex(tx_hash)

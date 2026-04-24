@@ -21,10 +21,3 @@ soundchains_base_url = "https://soundchains.org"
 # --- Модуль 3: Superstake (только IP, без ставки ETH) ---
 # Сколько раундов нужно для квеста
 superstake_rounds_required = 10
-
-# --- Модуль ELHEXA: граница игрового дня по Москве (0–23). Env BONUS9_ELHEXA_RESET_HOUR_MSK важнее.
-elhexa_reset_hour_msk = 22
-
-# --- Headless-режим браузера (true — без окна, false — с окном для отладки) ---
-gm_headless = true
-elhexa_headless = true

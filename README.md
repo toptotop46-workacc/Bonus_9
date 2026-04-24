@@ -11,7 +11,7 @@
 | ---------------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
 | **Startale: Swap ETH→USDSC** | Газ + ~0.02$ комса startale      | Свапает рандомную сумму 1.1-2$ ETH на USDSC                                    |
 | **Startale: Реферал**        | Газ                              | Создаёт новый кошелёк и регает его по реф коду                                 |
-| **Startale: Daily GM**       | Платит смарт аккаунт (бесплатно) | Через Playwright + mock-кошелёк на [app.startale.com](http://app.startale.com) |
+| **Startale: Daily GM**       | Газ                              | Прямой on-chain checkIn() вызов                                                 |
 | **SoundChains: Mint NFT**    | Газ                              | Делает минт трека с фейк данными                                               |
 | **Superstake: Claw Machine** | Газ                              | 10 раундов для квеста                                                          |
 | **ELHEXA: Daily Check-In**   | Платит смарт аккаунт (бесплатно) | 3 ежедневных чекина                                                            |
@@ -52,14 +52,6 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
-
-### Шаг 4. Playwright (Chromium)
-
-```bash
-playwright install chromium
-```
-
----
 
 ## Настройка файлов
 
